@@ -17,6 +17,8 @@ type configDefaults struct {
 	username     string
 	password     string
 	dialParallel int
+	dialTimeout  int
+	dnsCacheTTL  int
 }
 
 func loadConfigDefaults() (configDefaults, error) {
@@ -25,7 +27,9 @@ func loadConfigDefaults() (configDefaults, error) {
 		cidr:         "",
 		username:     "",
 		password:     "",
-		dialParallel: 3,
+		dialParallel: 5,
+		dialTimeout:  3000,
+		dnsCacheTTL:  30,
 	}
 
 	return loadDotEnvConfig(defaultEnvFile, defaults)
@@ -87,6 +91,18 @@ func loadDotEnvConfig(path string, defaults configDefaults) (configDefaults, err
 				return configDefaults{}, fmt.Errorf("%s:%d invalid DIAL_PARALLELISM: %w", path, lineNo, err)
 			}
 			config.dialParallel = dialParallel
+		case "DIAL_TIMEOUT_MS":
+			dialTimeout, err := parsePositiveInt(parsedValue, defaults.dialTimeout)
+			if err != nil {
+				return configDefaults{}, fmt.Errorf("%s:%d invalid DIAL_TIMEOUT_MS: %w", path, lineNo, err)
+			}
+			config.dialTimeout = dialTimeout
+		case "DNS_CACHE_TTL_SECONDS":
+			dnsCacheTTL, err := parseNonNegativeInt(parsedValue, defaults.dnsCacheTTL)
+			if err != nil {
+				return configDefaults{}, fmt.Errorf("%s:%d invalid DNS_CACHE_TTL_SECONDS: %w", path, lineNo, err)
+			}
+			config.dnsCacheTTL = dnsCacheTTL
 		}
 	}
 
@@ -139,6 +155,21 @@ func parsePositiveInt(raw string, fallback int) (int, error) {
 	}
 	if parsed <= 0 {
 		return 0, fmt.Errorf("must be greater than 0")
+	}
+	return parsed, nil
+}
+
+func parseNonNegativeInt(raw string, fallback int) (int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return fallback, nil
+	}
+
+	parsed, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, err
+	}
+	if parsed < 0 {
+		return 0, fmt.Errorf("must be greater than or equal to 0")
 	}
 	return parsed, nil
 }

@@ -14,6 +14,10 @@ The Go language implementation of [zu1k/http-proxy-ipv6-pool](https://github.com
     go run . --port <port> --cidr <your ipv6 cidr> --dial-parallel <count>
 ```
 
+```bash
+    go run . --dial-timeout-ms 3000 --dns-cache-ttl-seconds 30
+```
+
 The program will automatically load `.env` from the current working directory.
 Default values come from `.env`, and command-line flags still take precedence.
 
@@ -21,6 +25,12 @@ Default values come from `.env`, and command-line flags still take precedence.
     cp .env.example .env
     go run .
 ```
+
+Important runtime tuning options:
+
+- `DIAL_PARALLELISM`: how many random source IPv6 candidates race per request
+- `DIAL_TIMEOUT_MS`: timeout for a single candidate TCP connect
+- `DNS_CACHE_TTL_SECONDS`: IPv6 DNS cache TTL; set to `0` to disable cache
 
 Enable authentication for both the HTTP proxy and the SOCKS5 proxy:
 

@@ -13,10 +13,6 @@ var socks5Conf = &socks5.Config{}
 var socks5Server *socks5.Server
 
 func setupSocks5Server(authUser, authPassword string) {
-	// 指定出口 IP 地址
-	// 指定本地出口 IPv6 地址
-
-	// 创建一个 SOCKS5 服务器配置
 	socks5Conf = &socks5.Config{
 		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			conn, err := dialTCPViaRandomIPv6(ctx, addr, "socks5")
@@ -27,6 +23,7 @@ func setupSocks5Server(authUser, authPassword string) {
 			return conn, nil
 		},
 		Resolver: ipv6OnlySocksResolver{},
+		Rewriter: preserveSocks5FQDNRewriter{},
 	}
 	if authEnabled(authUser, authPassword) {
 		socks5Conf.Credentials = socks5.StaticCredentials{
@@ -34,7 +31,6 @@ func setupSocks5Server(authUser, authPassword string) {
 		}
 	}
 	var err error
-	// 创建 SOCKS5 服务器
 	socks5Server, err = socks5.New(socks5Conf)
 	if err != nil {
 		log.Fatal(err)
@@ -48,17 +44,33 @@ func (ipv6OnlySocksResolver) Resolve(ctx context.Context, name string) (context.
 		ctx = context.Background()
 	}
 
-	ipAddrs, err := net.DefaultResolver.LookupIPAddr(ctx, name)
+	ipAddrs, err := lookupIPv6Addrs(ctx, name)
 	if err != nil {
 		return ctx, nil, err
 	}
 
-	for _, ipAddr := range ipAddrs {
-		if ipAddr.IP == nil || ipAddr.IP.To4() != nil {
-			continue
-		}
-		return ctx, ipAddr.IP, nil
+	randomIndex, randomErr := randomInt(len(ipAddrs))
+	if randomErr != nil {
+		randomIndex = 0
+	}
+	if ipAddrs[randomIndex].IP == nil {
+		return ctx, nil, fmt.Errorf("target %s has no IPv6 address", name)
+	}
+	return ctx, append(net.IP(nil), ipAddrs[randomIndex].IP...), nil
+}
+
+type preserveSocks5FQDNRewriter struct{}
+
+func (preserveSocks5FQDNRewriter) Rewrite(ctx context.Context, request *socks5.Request) (context.Context, *socks5.AddrSpec) {
+	if request == nil {
+		return ctx, nil
+	}
+	if request.DestAddr == nil || request.DestAddr.FQDN == "" {
+		return ctx, request.DestAddr
 	}
 
-	return ctx, nil, fmt.Errorf("target %s has no IPv6 address", name)
+	return ctx, &socks5.AddrSpec{
+		FQDN: request.DestAddr.FQDN,
+		Port: request.DestAddr.Port,
+	}
 }

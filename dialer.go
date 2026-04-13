@@ -2,15 +2,15 @@ package main
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"fmt"
+	"math/big"
 	"net"
 	"strconv"
 	"time"
 )
 
-const (
-	ipv6DialTimeout = 10 * time.Second
-)
+var ipv6DialTimeout = 3 * time.Second
 
 func dialTCPViaRandomIPv6(ctx context.Context, target, tag string) (net.Conn, error) {
 	if ctx == nil {
@@ -101,6 +101,7 @@ func dialTCPViaSingleRandomIPv6(
 	if err != nil {
 		return nil, "", "", err
 	}
+	candidateRemoteAddrs := shuffleTCPAddrs(remoteAddrs)
 
 	dialer := &net.Dialer{
 		LocalAddr:     localAddr,
@@ -109,7 +110,7 @@ func dialTCPViaSingleRandomIPv6(
 	}
 
 	var dialErrors []error
-	for _, remoteAddr := range remoteAddrs {
+	for _, remoteAddr := range candidateRemoteAddrs {
 		conn, err := dialer.DialContext(ctx, "tcp6", remoteAddr.String())
 		if err == nil {
 			return conn, outgoingIP, remoteAddr.String(), nil
@@ -145,21 +146,14 @@ func resolveIPv6TCPAddrs(ctx context.Context, target string) ([]*net.TCPAddr, er
 		return []*net.TCPAddr{{IP: ip, Port: port}}, nil
 	}
 
-	ipAddrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	ipv6Addrs, err := lookupIPv6Addrs(ctx, host)
 	if err != nil {
-		return nil, fmt.Errorf("lookup %s: %w", host, err)
+		return nil, err
 	}
 
-	var tcpAddrs []*net.TCPAddr
-	for _, ipAddr := range ipAddrs {
-		if ipAddr.IP == nil || ipAddr.IP.To4() != nil {
-			continue
-		}
+	tcpAddrs := make([]*net.TCPAddr, 0, len(ipv6Addrs))
+	for _, ipAddr := range ipv6Addrs {
 		tcpAddrs = append(tcpAddrs, &net.TCPAddr{IP: ipAddr.IP, Port: port, Zone: ipAddr.Zone})
-	}
-
-	if len(tcpAddrs) == 0 {
-		return nil, fmt.Errorf("target %s has no IPv6 address", target)
 	}
 
 	return tcpAddrs, nil
@@ -186,4 +180,24 @@ func summarizeDialErrors(prefix string, errs []error) error {
 		return fmt.Errorf("%s: %w", prefix, errs[0])
 	}
 	return fmt.Errorf("%s: %w (and %d more errors)", prefix, errs[0], len(errs)-1)
+}
+
+func shuffleTCPAddrs(addrs []*net.TCPAddr) []*net.TCPAddr {
+	shuffled := append([]*net.TCPAddr(nil), addrs...)
+	for i := len(shuffled) - 1; i > 0; i-- {
+		j, err := randomInt(i + 1)
+		if err != nil {
+			return shuffled
+		}
+		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+	}
+	return shuffled
+}
+
+func randomInt(max int) (int, error) {
+	n, err := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(max)))
+	if err != nil {
+		return 0, err
+	}
+	return int(n.Int64()), nil
 }

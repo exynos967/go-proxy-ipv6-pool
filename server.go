@@ -23,6 +23,14 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
+func serveHTTPServer(server *http.Server, listener net.Listener) error {
+	err := server.Serve(listener)
+	if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
+}
+
 func listenAndServeSocks5(addr string) error {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -38,6 +46,9 @@ func serveSocks5Listener(listener net.Listener) error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
 			if isTemporaryNetError(err) {
 				delay = nextTemporaryAcceptDelay(delay)
 				log.Printf("[socks5] temporary accept error: %v; retrying in %s", err, delay)

@@ -62,12 +62,16 @@ func configureHTTPProxyConnect(proxy *goproxy.ProxyHttpServer, authUser, authPas
 			ctx.Resp = newHTTPProxyAuthRequiredResponse(ctx.Req)
 			return goproxy.RejectConnect, host
 		}
-		return newHTTPConnectAction(host), host
+		target, err := validateConnectHost(host)
+		if err != nil {
+			ctx.Resp = newHTTPBadRequestResponse(ctx.Req, err.Error()+"\n")
+			return goproxy.RejectConnect, host
+		}
+		return newHTTPConnectAction(target), host
 	})
 }
 
-func newHTTPConnectAction(host string) *goproxy.ConnectAction {
-	target := normalizeConnectHost(host)
+func newHTTPConnectAction(target string) *goproxy.ConnectAction {
 	return &goproxy.ConnectAction{
 		Action: goproxy.ConnectHijack,
 		Hijack: func(req *http.Request, client net.Conn, ctx *goproxy.ProxyCtx) {
@@ -91,11 +95,11 @@ func newHTTPConnectAction(host string) *goproxy.ConnectAction {
 	}
 }
 
-func normalizeConnectHost(host string) string {
+func validateConnectHost(host string) (string, error) {
 	if _, _, err := net.SplitHostPort(host); err == nil {
-		return host
+		return host, nil
 	}
-	return net.JoinHostPort(host, "80")
+	return "", fmt.Errorf("CONNECT target must include port")
 }
 
 func clearConnDeadline(conn net.Conn) {
@@ -187,4 +191,13 @@ func newHTTPProxyAuthRequiredResponse(req *http.Request) *http.Response {
 	)
 	response.Header.Set("Proxy-Authenticate", `Basic realm="`+proxyAuthRealm+`"`)
 	return response
+}
+
+func newHTTPBadRequestResponse(req *http.Request, body string) *http.Response {
+	return goproxy.NewResponse(
+		req,
+		goproxy.ContentTypeText,
+		http.StatusBadRequest,
+		body,
+	)
 }
