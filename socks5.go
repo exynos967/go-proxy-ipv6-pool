@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 
@@ -25,6 +26,7 @@ func setupSocks5Server(authUser, authPassword string) {
 			}
 			return conn, nil
 		},
+		Resolver: ipv6OnlySocksResolver{},
 	}
 	if authEnabled(authUser, authPassword) {
 		socks5Conf.Credentials = socks5.StaticCredentials{
@@ -37,4 +39,26 @@ func setupSocks5Server(authUser, authPassword string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+type ipv6OnlySocksResolver struct{}
+
+func (ipv6OnlySocksResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	ipAddrs, err := net.DefaultResolver.LookupIPAddr(ctx, name)
+	if err != nil {
+		return ctx, nil, err
+	}
+
+	for _, ipAddr := range ipAddrs {
+		if ipAddr.IP == nil || ipAddr.IP.To4() != nil {
+			continue
+		}
+		return ctx, ipAddr.IP, nil
+	}
+
+	return ctx, nil, fmt.Errorf("target %s has no IPv6 address", name)
 }
