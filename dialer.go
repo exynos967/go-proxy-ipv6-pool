@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	cryptorand "crypto/rand"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -102,6 +103,8 @@ func dialTCPViaSingleRandomIPv6(
 		return nil, "", "", err
 	}
 	candidateRemoteAddrs := shuffleTCPAddrs(remoteAddrs)
+	candidateCtx, cancel := context.WithTimeout(ctx, ipv6DialTimeout)
+	defer cancel()
 
 	dialer := &net.Dialer{
 		LocalAddr:     localAddr,
@@ -111,12 +114,19 @@ func dialTCPViaSingleRandomIPv6(
 
 	var dialErrors []error
 	for _, remoteAddr := range candidateRemoteAddrs {
-		conn, err := dialer.DialContext(ctx, "tcp6", remoteAddr.String())
+		conn, err := dialer.DialContext(candidateCtx, "tcp6", remoteAddr.String())
 		if err == nil {
 			return conn, outgoingIP, remoteAddr.String(), nil
 		}
-		if ctx.Err() != nil {
-			return nil, outgoingIP, remoteAddr.String(), ctx.Err()
+		if candidateCtx.Err() != nil {
+			if !errors.Is(candidateCtx.Err(), context.DeadlineExceeded) {
+				return nil, outgoingIP, remoteAddr.String(), candidateCtx.Err()
+			}
+			dialErrors = append(dialErrors, fmt.Errorf("candidate %d via %s exhausted total budget %s while trying %s: %w", candidate, outgoingIP, ipv6DialTimeout, remoteAddr.String(), candidateCtx.Err()))
+			return nil, outgoingIP, remoteAddr.String(), summarizeDialErrors(
+				fmt.Sprintf("[%s] dial %s via %s failed", tag, target, outgoingIP),
+				dialErrors,
+			)
 		}
 
 		dialErrors = append(dialErrors, fmt.Errorf("candidate %d via %s -> %s: %w", candidate, outgoingIP, remoteAddr.String(), err))
