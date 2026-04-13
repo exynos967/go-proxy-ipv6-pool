@@ -15,7 +15,7 @@ The Go language implementation of [zu1k/http-proxy-ipv6-pool](https://github.com
 ```
 
 ```bash
-    go run . --dial-timeout-ms 3000 --dns-cache-ttl-seconds 30
+    go run . --dial-timeout-ms 5000 --dns-cache-ttl-seconds 30
 ```
 
 The program will automatically load `.env` from the current working directory.

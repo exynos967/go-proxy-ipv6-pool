@@ -28,7 +28,7 @@ func loadConfigDefaults() (configDefaults, error) {
 		username:     "",
 		password:     "",
 		dialParallel: 5,
-		dialTimeout:  3000,
+		dialTimeout:  5000,
 		dnsCacheTTL:  30,
 	}
 
