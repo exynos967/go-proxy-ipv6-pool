@@ -1,111 +1,190 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/elazarl/goproxy"
 )
 
-var httpProxy = goproxy.NewProxyHttpServer()
+const proxyAuthRealm = "proxy-ipv6-pool"
 
-func init() {
-	httpProxy.Verbose = true
+var httpProxy *goproxy.ProxyHttpServer
 
-	httpProxy.OnRequest().DoFunc(
-		func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-			// 为 IPv6 地址添加方括号
-			outgoingIP, err := generateRandomIPv6(cidr)
+func setupHTTPProxy(authUser, authPassword string) {
+	httpProxy = goproxy.NewProxyHttpServer()
+	httpProxy.Verbose = false
+	httpProxy.Tr.DisableKeepAlives = true
+	httpProxy.Tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := dialTCPViaRandomIPv6(ctx, addr, "http")
+		if err != nil {
+			log.Printf("[http] Dial to %s error: %v", addr, err)
+			return nil, err
+		}
+		return conn, nil
+	}
+	httpProxy.ConnectDialWithReq = func(req *http.Request, network, addr string) (net.Conn, error) {
+		conn, err := dialTCPViaRandomIPv6(req.Context(), addr, "http-connect")
+		if err != nil {
+			log.Printf("[http] CONNECT to %s error: %v", addr, err)
+			return nil, err
+		}
+		return conn, nil
+	}
+	configureHTTPProxyConnect(httpProxy, authUser, authPassword)
+	configureHTTPProxyAuth(httpProxy, authUser, authPassword)
+}
+
+func configureHTTPProxyAuth(proxy *goproxy.ProxyHttpServer, authUser, authPassword string) {
+	if !authEnabled(authUser, authPassword) {
+		return
+	}
+
+	proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+		if hasValidHTTPProxyCredentials(req, authUser, authPassword) {
+			return req, nil
+		}
+		return req, newHTTPProxyAuthRequiredResponse(req)
+	})
+}
+
+func configureHTTPProxyConnect(proxy *goproxy.ProxyHttpServer, authUser, authPassword string) {
+	proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+		if authEnabled(authUser, authPassword) && !hasValidHTTPProxyCredentials(ctx.Req, authUser, authPassword) {
+			ctx.Resp = newHTTPProxyAuthRequiredResponse(ctx.Req)
+			return goproxy.RejectConnect, host
+		}
+		return newHTTPConnectAction(host), host
+	})
+}
+
+func newHTTPConnectAction(host string) *goproxy.ConnectAction {
+	target := normalizeConnectHost(host)
+	return &goproxy.ConnectAction{
+		Action: goproxy.ConnectHijack,
+		Hijack: func(req *http.Request, client net.Conn, ctx *goproxy.ProxyCtx) {
+			clearConnDeadline(client)
+
+			targetConn, err := dialTCPViaRandomIPv6(req.Context(), target, "http-connect")
 			if err != nil {
-				log.Printf("Generate random IPv6 error: %v", err)
-				return req, nil
-			}
-			outgoingIP = "[" + outgoingIP + "]"
-			// 使用指定的出口 IP 地址创建连接
-			localAddr, err := net.ResolveTCPAddr("tcp", outgoingIP+":0")
-			if err != nil {
-				log.Printf("[http] Resolve local address error: %v", err)
-				return req, nil
-			}
-			dialer := net.Dialer{
-				LocalAddr: localAddr,
+				log.Printf("[http] CONNECT to %s error: %v", target, err)
+				writeHTTPConnectError(client, err)
+				return
 			}
 
-			// 通过代理服务器建立到目标服务器的连接
-			// 发送 http 请求
-			// 使用自定义拨号器设置 HTTP 客户端
-			// 创建新的 HTTP 请求
-
-			newReq, err := http.NewRequest(req.Method, req.URL.String(), req.Body)
-			if err != nil {
-				log.Printf("[http] New request error: %v", err)
-				return req, nil
-			}
-			newReq.Header = req.Header
-
-			// 设置自定义拨号器的 HTTP 客户端
-			client := &http.Client{
-				Transport: &http.Transport{
-					DialContext: dialer.DialContext,
-				},
+			if _, err := io.WriteString(client, "HTTP/1.0 200 Connection established\r\n\r\n"); err != nil {
+				_ = targetConn.Close()
+				_ = client.Close()
+				return
 			}
 
-			// 发送 HTTP 请求
-			resp, err := client.Do(newReq)
-			if err != nil {
-				log.Printf("[http] Send request error: %v", err)
-				return req, nil
-			}
-			return req, resp
+			proxyHTTPConnectTunnel(client, targetConn)
 		},
+	}
+}
+
+func normalizeConnectHost(host string) string {
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return host
+	}
+	return net.JoinHostPort(host, "80")
+}
+
+func clearConnDeadline(conn net.Conn) {
+	_ = conn.SetDeadline(time.Time{})
+}
+
+func writeHTTPConnectError(client net.Conn, err error) {
+	body := err.Error()
+	response := fmt.Sprintf(
+		"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s",
+		len(body),
+		body,
 	)
+	_, _ = io.WriteString(client, response)
+	_ = client.Close()
+}
 
-	httpProxy.OnRequest().HijackConnect(
-		func(req *http.Request, client net.Conn, ctx *goproxy.ProxyCtx) {
-			// 通过代理服务器建立到目标服务器的连接
-			outgoingIP, err := generateRandomIPv6(cidr)
-			if err != nil {
-				log.Printf("Generate random IPv6 error: %v", err)
-				return
-			}
-			outgoingIP = "[" + outgoingIP + "]"
-			// 使用指定的出口 IP 地址创建连接
-			localAddr, err := net.ResolveTCPAddr("tcp", outgoingIP+":0")
-			if err != nil {
-				log.Printf("[http] Resolve local address error: %v", err)
-				return
-			}
-			dialer := net.Dialer{
-				LocalAddr: localAddr,
-			}
+type tunnelHalfClosable interface {
+	net.Conn
+	CloseWrite() error
+	CloseRead() error
+}
 
-			// 通过代理服务器建立到目标服务器的连接
-			server, err := dialer.Dial("tcp", req.URL.Host)
-			if err != nil {
-				log.Printf("[http] Dial to %s error: %v", req.URL.Host, err)
-				client.Write([]byte("HTTP/1.1 500 Internal Server Error\r\n\r\n"))
-				client.Close()
-				return
-			}
+func proxyHTTPConnectTunnel(client, target net.Conn) {
+	targetTCP, targetOK := target.(tunnelHalfClosable)
+	clientTCP, clientOK := client.(tunnelHalfClosable)
+	if targetOK && clientOK {
+		go tunnelCopyAndClose(targetTCP, clientTCP)
+		go tunnelCopyAndClose(clientTCP, targetTCP)
+		return
+	}
 
-			// 响应客户端连接已建立
-			client.Write([]byte("HTTP/1.0 200 OK\r\n\r\n"))
-			// 从客户端复制数据到目标服务器
-			go func() {
-				defer server.Close()
-				defer client.Close()
-				io.Copy(server, client)
-			}()
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go tunnelCopyOrClose(target, client, &wg)
+		go tunnelCopyOrClose(client, target, &wg)
+		wg.Wait()
+		_ = client.Close()
+		_ = target.Close()
+	}()
+}
 
-			// 从目标服务器复制数据到客户端
-			go func() {
-				defer server.Close()
-				defer client.Close()
-				io.Copy(client, server)
-			}()
+func tunnelCopyAndClose(dst, src tunnelHalfClosable) {
+	_, _ = io.Copy(dst, src)
+	_ = dst.CloseWrite()
+	_ = src.CloseRead()
+}
 
-		},
+func tunnelCopyOrClose(dst io.Writer, src io.Reader, wg *sync.WaitGroup) {
+	defer wg.Done()
+	_, _ = io.Copy(dst, src)
+}
+
+func hasValidHTTPProxyCredentials(req *http.Request, expectedUser, expectedPassword string) bool {
+	if req == nil {
+		return false
+	}
+
+	authHeader := strings.TrimSpace(req.Header.Get("Proxy-Authorization"))
+	if authHeader == "" {
+		return false
+	}
+
+	scheme, encoded, found := strings.Cut(authHeader, " ")
+	if !found || !strings.EqualFold(scheme, "Basic") {
+		return false
+	}
+
+	rawCredentials, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
+	if err != nil {
+		return false
+	}
+
+	user, pass, found := strings.Cut(string(rawCredentials), ":")
+	if !found {
+		return false
+	}
+
+	return user == expectedUser && pass == expectedPassword
+}
+
+func newHTTPProxyAuthRequiredResponse(req *http.Request) *http.Response {
+	response := goproxy.NewResponse(
+		req,
+		goproxy.ContentTypeText,
+		http.StatusProxyAuthRequired,
+		"proxy authentication required\n",
 	)
+	response.Header.Set("Proxy-Authenticate", `Basic realm="`+proxyAuthRealm+`"`)
+	return response
 }

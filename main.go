@@ -6,21 +6,33 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"sync"
 )
 
 var cidr string
 var port int
+var username string
+var password string
+var dialParallel int
 
 func main() {
+	defaults, err := loadConfigDefaults()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	flag.IntVar(&port, "port", 52122, "server port")
-	flag.StringVar(&cidr, "cidr", "", "ipv6 cidr")
+	flag.IntVar(&port, "port", defaults.port, "server port")
+	flag.StringVar(&cidr, "cidr", defaults.cidr, "ipv6 cidr")
+	flag.StringVar(&username, "username", defaults.username, "proxy auth username")
+	flag.StringVar(&password, "password", defaults.password, "proxy auth password")
+	flag.IntVar(&dialParallel, "dial-parallel", defaults.dialParallel, "parallel IPv6 dial candidates")
 	flag.Parse()
 
 	if cidr == "" {
 		log.Fatal("cidr is empty")
+	}
+	if err := validateAuthConfig(username, password); err != nil {
+		log.Fatal(err)
 	}
 
 	httpPort := port
@@ -29,29 +41,38 @@ func main() {
 	if socks5Port > 65535 {
 		log.Fatal("port too large")
 	}
+	if dialParallel <= 0 {
+		log.Fatal("dial-parallel must be greater than 0")
+	}
+
+	setupHTTPProxy(username, password)
+	setupSocks5Server(username, password)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	go func() {
-		err := socks5Server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", socks5Port))
+		err := listenAndServeSocks5(fmt.Sprintf("0.0.0.0:%d", socks5Port))
 		if err != nil {
-			log.Fatal("socks5 Server err:",err)
+			log.Fatal("socks5 Server err:", err)
 		}
 
 	}()
 	go func() {
-		err := http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", httpPort), httpProxy)
+		err := newHTTPServer(fmt.Sprintf("0.0.0.0:%d", httpPort), httpProxy).ListenAndServe()
 		if err != nil {
-			log.Fatal("http Server err",err)
+			log.Fatal("http Server err", err)
 		}
 	}()
-
 
 	log.Println("server running ...")
 	log.Printf("http running on 0.0.0.0:%d", httpPort)
 	log.Printf("socks5 running on 0.0.0.0:%d", socks5Port)
 	log.Printf("ipv6 cidr:[%s]", cidr)
+	log.Printf("dial parallelism:%d", dialParallel)
+	if authEnabled(username, password) {
+		log.Printf("proxy auth enabled for username:%s", username)
+	}
 	wg.Wait()
 
 }
